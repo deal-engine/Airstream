@@ -4,10 +4,6 @@ normalizedName := "airstream"
 
 organization := "com.raquo"
 
-scalaVersion := "2.13.3"
-
-crossScalaVersions := Seq("2.12.11", "2.13.3")
-
 homepage := Some(url("https://github.com/raquo/Airstream"))
 
 licenses += ("MIT", url("https://github.com/raquo/Airstream/blob/master/LICENSE.md"))
@@ -32,13 +28,31 @@ sonatypeProfileName := "com.raquo"
 
 publishMavenStyle := true
 
-publishArtifact in Test := false
+(Test / publishArtifact) := false
 
-publishTo := sonatypePublishTo.value
+publishTo := sonatypePublishToBundle.value
 
 releaseCrossBuild := true
 
 pomIncludeRepository := { _ => false }
+
+releaseProcess := {
+  import ReleaseTransformations._
+  Seq[ReleaseStep](
+    checkSnapshotDependencies,
+    inquireVersions,
+    runClean,
+    runTest,
+    setReleaseVersion,
+    commitReleaseVersion,
+    tagRelease,
+    releaseStepCommandAndRemaining("+publishSigned"),
+    releaseStepCommand("sonatypeBundleRelease"),
+    setNextVersion,
+    commitNextVersion,
+    pushChanges
+  )
+}
 
 //useGpg := true
 

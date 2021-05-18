@@ -2,11 +2,10 @@ package com.raquo.airstream.errors
 
 import com.raquo.airstream.UnitSpec
 import com.raquo.airstream.core.AirstreamError.{CombinedError, ErrorHandlingError}
-import com.raquo.airstream.core.{AirstreamError, Observer}
+import com.raquo.airstream.core.{AirstreamError, EventStream, Observer}
 import com.raquo.airstream.eventbus.EventBus
-import com.raquo.airstream.eventstream.EventStream
 import com.raquo.airstream.fixtures.{Calculation, Effect, TestableOwner}
-import com.raquo.airstream.signal.Var
+import com.raquo.airstream.state.Var
 import org.scalatest.BeforeAndAfter
 
 import scala.collection.mutable
@@ -70,7 +69,7 @@ class EventStreamErrorSpec extends UnitSpec with BeforeAndAfter {
     val bus1 = new EventBus[Int]
     val bus2 = new EventBus[Int]
 
-    val stream = bus1.events.combineWith(bus2.events).map2(_ * 100 + _).map(Calculation.log("stream", calculations))
+    val stream = bus1.events.combineWith(bus2.events).mapN(_ * 100 + _).map(Calculation.log("stream", calculations))
 
     // sub1 does not handle errors, so they go to unhandled
 
@@ -154,8 +153,8 @@ class EventStreamErrorSpec extends UnitSpec with BeforeAndAfter {
     val bus = new EventBus[Int]
 
     val stream1 = bus.events.map(Calculation.log("stream1", calculations))
-    val signal1 = stream1.toSignal(-1).map(Calculation.log("signal1", calculations))
-    val signal2 = stream1.toSignal(-1).map(Calculation.log("signal2", calculations))
+    val signal1 = stream1.startWith(-1).map(Calculation.log("signal1", calculations))
+    val signal2 = stream1.startWith(-1).map(Calculation.log("signal2", calculations))
 
     // These subs do not handle errors, so they go to unhandled
 

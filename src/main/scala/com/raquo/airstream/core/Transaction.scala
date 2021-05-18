@@ -18,13 +18,15 @@ class Transaction(private[Transaction] val code: Transaction => Any) {
     *
     * Corollary: An Observable that is dequeue-d from here does not synchronously depend on any other pending observables
     */
-  private[airstream] val pendingObservables: JsPriorityQueue[SyncObservable[_]] = new JsPriorityQueue(_.topoRank)
+  private[airstream] val pendingObservables: JsPriorityQueue[SyncObservable[_]] = {
+    new JsPriorityQueue(Protected.topoRank)
+  }
 
   Transaction.pendingTransactions.add(this)
 
   @inline private[Transaction] def resolvePendingObservables(): Unit = {
     while (pendingObservables.nonEmpty) {
-      //      dom.console.log("RANKS: ", pendingObservables.map(_.topoRank))
+      //dom.console.log("RANKS: ", pendingObservables.debugQueue.map(_.topoRank))
       // Fire the first pending observable and remove it from the list
       pendingObservables.dequeue().syncFire(this)
     }
@@ -187,7 +189,10 @@ object Transaction { // extends GlobalCounter {
     * Note: To completely unsubscribe an Observer from this Observable, you need to remove it as many times
     * as you added it to this Observable.
     */
-  private[core] def removeExternalObserver[A](observable: Observable[A], observer: Observer[A]): Unit = {
+  private[core] def removeExternalObserver[A](
+    observable: Observable[A],
+    observer: Observer[A]
+  ): Unit = {
     if (isSafeToRemoveObserver) {
       // remove right now – useful for efficient recursive removals
       observable.removeExternalObserverNow(observer)
@@ -227,6 +232,11 @@ object Transaction { // extends GlobalCounter {
       transaction.code(transaction) // @TODO[API] Shouldn't we guard against exceptions in `code` here? It can be provided by the user.
       transaction.resolvePendingObservables()
     } finally {
+      // @TODO[API,Integrity]
+      //  This block is executed regardless of whether an exception is thrown in `code` or not,
+      //  but it doesn't actually catch the exception, so `new Transaction(code)` actually throws
+      //  iff `code` throws AND the transaction was created while no other transaction is running
+      //  This is not very predictable, so we should fix it.
       isSafeToRemoveObserver = true
       //println(s"--end trx ${transaction.id}")
       pendingTransactions.done(transaction)

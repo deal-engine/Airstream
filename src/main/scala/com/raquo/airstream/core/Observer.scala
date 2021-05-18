@@ -1,10 +1,14 @@
 package com.raquo.airstream.core
 
 import com.raquo.airstream.core.AirstreamError.{ObserverError, ObserverErrorHandlingError}
+import com.raquo.airstream.debug.DebuggableObserver
 
+import scala.scalajs.js
 import scala.util.{Failure, Success, Try}
 
-trait Observer[-A] {
+trait Observer[-A] extends Sink[A] with Named {
+
+  lazy val toJsFn1: js.Function1[A, Unit] = onNext _
 
   /** Note: must not throw! */
   def onNext(nextValue: A): Unit
@@ -31,10 +35,36 @@ trait Observer[-A] {
     )
   }
 
-  /** Like `contramap` but with `collect` semantics: not calling the original observer when `pf` is not defined */
+  /** @param project must not throw! */
+  def contramapTry[B](project: Try[B] => Try[A]): Observer[B] = {
+    Observer.fromTry { case nextValue => onTry(project(nextValue)) }
+  }
+
+  /** Available only on Observers of Option, this is a shortcut for contramap[B](Some(_)) */
+  def contramapSome[V](implicit evidence: Option[V] <:< A): Observer[V] = {
+    contramap[V](value => evidence(Some(value)))
+  }
+
+  /** Like [[contramap]] but with `collect` semantics: not calling the original observer when `pf` is not defined
+    *
+    * @param pf Note: guarded against exceptions
+    */
   def contracollect[B](pf: PartialFunction[B, A]): Observer[B] = {
     Observer.withRecover(
       nextValue => pf.runWith(onNext)(nextValue),
+      { case nextError => onError(nextError) }
+    )
+  }
+
+  /** Like [[contramap]], but original observer only fires if `project` returns Some(value)
+    *
+    * So, similar to [[contracollect]] but optimized for APIs like `NonEmptyList.fromList` that return an Option.
+    *
+    * @param project Note: guarded against exceptions
+    */
+  def contramapOpt[B](project: B => Option[A]): Observer[B] = {
+    Observer.withRecover(
+      nextValue => project(nextValue).foreach(onNext),
       { case nextError => onError(nextError) }
     )
   }
@@ -49,16 +79,31 @@ trait Observer[-A] {
       case nextError => onError(nextError)
     })
   }
+
+  /** Creates another Observer such that calling it calls the original observer after the specified delay. */
+  def delay(ms: Int): Observer[A] = {
+    Observer.fromTry { case nextValue =>
+      js.timers.setTimeout(ms.toDouble) {
+        onTry(nextValue)
+      }
+    }
+  }
+
+  override def toObserver: Observer[A] = this
 }
 
 object Observer {
 
+  private val _empty = Observer[Any](_ => ())
 
   /** An observer that does nothing. Use it to ensure that an Observable is started
     *
     * Used by SignalView and EventStreamView
     */
-  val empty: Observer[Any] = Observer[Any](_ => ())
+  def empty[A]: Observer[A] = _empty
+
+  /** Provides debug* methods for observers */
+  implicit def toDebuggableObserver[A](observer: Observer[A]): DebuggableObserver[A] = new DebuggableObserver(observer)
 
   /** @param onNext Note: guarded against exceptions */
   def apply[A](onNext: A => Unit): Observer[A] = {
@@ -71,24 +116,36 @@ object Observer {
   }
 
   /**
-    * @param onNext Note: guarded against exceptions
-    * @param onError Note: guarded against exceptions
+    * @param onNext               Note: guarded against exceptions. See docs for details.
+    * @param onError              Note: guarded against exceptions. See docs for details.
+    * @param handleObserverErrors If true, we will call this observer's onError(ObserverError(err))
+    *                             if this observer throws while processing an incoming event,
+    *                             giving this observer one last chance to process its own error.
     */
-  def withRecover[A](onNext: A => Unit, onError: PartialFunction[Throwable, Unit]): Observer[A] = {
+  def withRecover[A](
+    onNext: A => Unit,
+    onError: PartialFunction[Throwable, Unit],
+    handleObserverErrors: Boolean = true
+  ): Observer[A] = {
     val onNextParam = onNext // It's beautiful on the outside
     val onErrorParam = onError
     new Observer[A] {
 
-      override final def onNext(nextValue: A): Unit = {
+      override def onNext(nextValue: A): Unit = {
         // dom.console.log(s"===== Observer(${hashCode()}).onNext", nextValue.asInstanceOf[js.Any])
         try {
           onNextParam(nextValue)
         } catch {
-          case err: Throwable => AirstreamError.sendUnhandledError(ObserverError(err))
+          case err: Throwable =>
+            if (handleObserverErrors) {
+              this.onError(ObserverError(err)) // this doesn't throw, see below
+            } else {
+              AirstreamError.sendUnhandledError(ObserverError(err))
+            }
         }
       }
 
-      override final def onError(error: Throwable): Unit = {
+      override def onError(error: Throwable): Unit = {
         try {
           if (onErrorParam.isDefinedAt(error)) {
             onErrorParam(error)
@@ -96,44 +153,56 @@ object Observer {
             AirstreamError.sendUnhandledError(error)
           }
         } catch {
-          case err: Throwable => AirstreamError.sendUnhandledError(ObserverErrorHandlingError(error = err, cause = error))
+          case err: Throwable =>
+            AirstreamError.sendUnhandledError(ObserverErrorHandlingError(error = err, cause = error))
         }
       }
 
-      override final def onTry(nextValue: Try[A]): Unit = {
+      override def onTry(nextValue: Try[A]): Unit = {
         nextValue.fold(onError, onNext)
       }
     }
   }
 
-  /** @param onTry Note: guarded against exceptions */
-  def fromTry[A](onTry: PartialFunction[Try[A], Unit]): Observer[A] = {
+  /** @param onTry                Note: guarded against exceptions. See docs for details.
+    * @param handleObserverErrors If true, we will call this observer's onError(ObserverError(err))
+    *                             if this observer throws while processing an incoming event,
+    *                             giving this observer one last chance to process its own error.
+    */
+  def fromTry[A](
+    onTry: PartialFunction[Try[A], Unit],
+    handleObserverErrors: Boolean = true
+  ): Observer[A] = {
     val onTryParam = onTry
 
     new Observer[A] {
 
-      override final def onNext(nextValue: A): Unit = {
+      override def onNext(nextValue: A): Unit = {
         // dom.console.log(s"===== Observer(${hashCode()}).onNext", nextValue.asInstanceOf[js.Any])
         onTry(Success(nextValue))
       }
 
-      override final def onError(error: Throwable): Unit = {
+      override def onError(error: Throwable): Unit = {
         onTry(Failure(error))
       }
 
-      override final def onTry(nextValue: Try[A]): Unit = {
+      override def onTry(nextValue: Try[A]): Unit = {
         try {
           if (onTryParam.isDefinedAt(nextValue)) {
             onTryParam(nextValue)
           } else {
-            nextValue.fold(err => AirstreamError.sendUnhandledError(err), identity)
+            nextValue.fold(err => AirstreamError.sendUnhandledError(err), _ => ())
           }
         } catch {
           case err: Throwable =>
-            nextValue.fold(
-              originalError => AirstreamError.sendUnhandledError(ObserverErrorHandlingError(error = err, cause = originalError)),
-              _ => AirstreamError.sendUnhandledError(ObserverError(err))
-            )
+            if (handleObserverErrors && nextValue.isSuccess) {
+              this.onError(ObserverError(err)) // this calls onTry so it doesn't throw
+            } else {
+              nextValue.fold(
+                originalError => AirstreamError.sendUnhandledError(ObserverErrorHandlingError(error = err, cause = originalError)),
+                _ => AirstreamError.sendUnhandledError(ObserverError(err))
+              )
+            }
         }
       }
     }
@@ -151,8 +220,8 @@ object Observer {
         observers.foreach(_.onError(err))
       }
 
-      override final def onTry(nextValue: Try[A]): Unit = {
-        nextValue.fold(onError, onNext)
+      override def onTry(nextValue: Try[A]): Unit = {
+        observers.foreach(_.onTry(nextValue))
       }
     }
   }

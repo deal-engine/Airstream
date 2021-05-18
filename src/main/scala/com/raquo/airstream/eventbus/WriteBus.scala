@@ -1,7 +1,6 @@
 package com.raquo.airstream.eventbus
 
-import com.raquo.airstream.core.{Observer, Transaction}
-import com.raquo.airstream.eventstream.EventStream
+import com.raquo.airstream.core.{EventStream, InternalObserver, Observer, Transaction}
 import com.raquo.airstream.ownership.{Owner, Subscription}
 import com.raquo.airstream.util.hasDuplicateTupleKeys
 
@@ -12,7 +11,7 @@ class WriteBus[A] extends Observer[A] {
   /** Hidden here because the public interface of WriteBus is all about writing
     * rather than reading, but exposed in [[EventBus]]
     */
-  private[eventbus] val stream: EventBusStream[A] = new EventBusStream(this)
+  private[eventbus] val stream: EventBusStream[A] = new EventBusStream()
 
   /** Note: this source will be removed when the `owner` you provide says so.
     * To remove this source manually, call .kill() on the resulting Subscription.
@@ -45,7 +44,7 @@ class WriteBus[A] extends Observer[A] {
   override def onNext(nextValue: A): Unit = {
     if (stream.isStarted) { // important check
       // @TODO[Integrity] We rely on the knowledge that EventBusStream discards the transaction it's given. Laaaame
-      stream.onNext(nextValue, ignoredTransaction = null)
+      InternalObserver.onNext(stream, nextValue, transaction = null)
     }
     // else {
     //   println(">>>> WriteBus.onNext called, but stream is not started!")
@@ -55,7 +54,7 @@ class WriteBus[A] extends Observer[A] {
   override def onError(nextError: Throwable): Unit = {
     if (stream.isStarted) {
       // @TODO[Integrity] We rely on the knowledge that EventBusStream discards the transaction it's given. Laaaame
-      stream.onError(nextError, transaction = null)
+      InternalObserver.onError(stream, nextError, transaction = null)
     }
   }
 
@@ -92,7 +91,7 @@ object WriteBus {
   /** Emit events into several WriteBus-es at once (in the same transaction)
     * Example usage: emitTry(writeBus1 -> value1, writeBus2 -> value2)
     */
-  def emit(values: BusTuple[_]*): Unit = {
+  def emit[A](values: BusTuple[A]*): Unit = {
     //println(s"> init trx from WriteBus.emit($values)")
     if (hasDuplicateTupleKeys(values)) {
       throw new Exception("Unable to {EventBus,WriteBus}.emit: the provided list of event buses has duplicates. You can't make an observable emit more than one event per transaction.")
@@ -103,7 +102,7 @@ object WriteBus {
   /** Emit events into several WriteBus-es at once (in the same transaction)
     * Example usage: emitTry(writeBus1 -> Success(value1), writeBus2 -> Failure(error2))
     */
-  def emitTry(values: BusTryTuple[_]*): Unit = {
+  def emitTry[A](values: BusTryTuple[A]*): Unit = {
     //println(s"> init trx from WriteBus.emitTry($values)")
     if (hasDuplicateTupleKeys(values)) {
       throw new Exception("Unable to {EventBus,WriteBus}.emitTry: the provided list of event buses has duplicates. You can't make an observable emit more than one event per transaction.")

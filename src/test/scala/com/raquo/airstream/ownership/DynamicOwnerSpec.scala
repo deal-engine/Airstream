@@ -4,7 +4,7 @@ import com.raquo.airstream.UnitSpec
 import com.raquo.airstream.core.Observer
 import com.raquo.airstream.eventbus.EventBus
 import com.raquo.airstream.fixtures.Effect
-import com.raquo.airstream.signal.Var
+import com.raquo.airstream.state.Var
 
 import scala.collection.mutable
 
@@ -22,7 +22,7 @@ class DynamicOwnerSpec extends UnitSpec {
 
     val dynOwner = new DynamicOwner(() => fail("Attempted to use permakilled owner!"))
 
-    val dynSub1 = DynamicSubscription(dynOwner, owner => bus1.events.addObserver(obs1)(owner))
+    DynamicSubscription(dynOwner, owner => bus1.events.addObserver(obs1)(owner))
 
     bus1.writer.onNext(100)
 

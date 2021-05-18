@@ -10,22 +10,48 @@ sealed abstract class AirstreamError(message: String) extends Throwable(message)
 // @TODO[Naming]
 object AirstreamError {
 
-  // @TODO[API] What kind of information do we want to capture to make recovery easier?
+  case class VarError(message: String, cause: Option[Throwable])
+    extends AirstreamError(s"$message; cause: ${cause.map(_.getMessage)}") {
 
-  // @TODO[API] Should this be its own error? If so, should now() also throw a special error?
-//  case class VarUpdateError(cause: Throwable)
-//    extends AirstreamError("VarUpdateError: unable to update errored Var; cause: " + cause.getMessage)
+    cause.foreach(initCause)
+
+    override def toString: String = s"VarError: $message; cause: $cause"
+  }
 
   case class ErrorHandlingError(error: Throwable, cause: Throwable)
-    extends AirstreamError("ErrorHandlingError: " + error.getMessage + "; cause: " + cause.getMessage)
+    extends AirstreamError(s"ErrorHandlingError: ${error.getMessage}; cause: ${cause.getMessage}") {
 
-  // @TODO[API] Should we maybe get a special case for Combine2, like CombinedError2(Try[A], Try[B])? This would make it easier to recover from such errors
+    initCause(cause)
+
+    override def toString: String = s"ErrorHandlingError: $error; cause: $cause"
+  }
+
   case class CombinedError(causes: Seq[Option[Throwable]])
-    extends AirstreamError("CombinedError: " + causes.flatten.map(_.getMessage).mkString("; "))
+    extends AirstreamError(s"CombinedError: ${causes.flatten.map(_.getMessage).mkString("; ")}") {
 
-  case class ObserverError(error: Throwable) extends AirstreamError("ObserverError: " + error.getMessage)
+    causes.flatten.headOption.foreach(initCause) // Just get the first cause – better than nothing I guess?
 
-  case class ObserverErrorHandlingError(error: Throwable, cause: Throwable) extends AirstreamError("ObserverErrorHandlingError: " + error.getMessage + "; cause: " + cause.getMessage)
+    override def toString: String = s"CombinedError: ${causes.flatten.toList.mkString("; ")}"
+  }
+
+  case class ObserverError(error: Throwable) extends AirstreamError(s"ObserverError: ${error.getMessage}") {
+
+    override def toString: String = s"ObserverError: $error"
+  }
+
+  case class ObserverErrorHandlingError(error: Throwable, cause: Throwable)
+    extends AirstreamError(s"ObserverErrorHandlingError: ${error.getMessage}; cause: ${cause.getMessage}") {
+
+    initCause(cause)
+
+    override def toString: String = s"ObserverErrorHandlingError: $error; cause: $cause"
+  }
+
+  case class DebugError(error: Throwable, cause: Option[Throwable])
+    extends AirstreamError(s"DebugError: ${error.getMessage}; cause: ${cause.map(_.getMessage)}") {
+
+    override def toString: String = s"DebugError: $error; cause: $cause"
+  }
 
   // --
 

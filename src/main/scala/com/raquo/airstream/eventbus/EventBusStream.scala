@@ -1,20 +1,18 @@
 package com.raquo.airstream.eventbus
 
-import com.raquo.airstream.core.Transaction
-import com.raquo.airstream.eventstream.EventStream
-import com.raquo.airstream.features.InternalNextErrorObserver
+import com.raquo.airstream.common.InternalNextErrorObserver
+import com.raquo.airstream.core.{ EventStream, Transaction, WritableEventStream }
 
 import scala.scalajs.js
 
-class EventBusStream[A] private[eventbus] (writeBus: WriteBus[A]) extends EventStream[A] with InternalNextErrorObserver[A] {
+class EventBusStream[A] private[eventbus] () extends WritableEventStream[A] with InternalNextErrorObserver[A] {
 
   private[eventbus] val sourceStreams: js.Array[EventStream[A]] = js.Array()
 
   /** Made more public to allow usage from WriteBus */
   override protected[eventbus] def isStarted: Boolean = super.isStarted
 
-  // @TODO document why. Basically event bus breaks the "static DAG" requirement for topo ranking
-  override protected[airstream] val topoRank: Int = 1
+  override protected val topoRank: Int = 1
 
   @inline private[eventbus] def addSource(sourceStream: EventStream[A]): Unit = {
     sourceStreams.push(sourceStream)
@@ -34,7 +32,7 @@ class EventBusStream[A] private[eventbus] (writeBus: WriteBus[A]) extends EventS
   }
 
   /** @param ignoredTransaction normally EventBus emits all events in a new transaction, so it ignores whatever is provided. */
-  override protected[airstream] def onNext(nextValue: A, ignoredTransaction: Transaction): Unit = {
+  override protected def onNext(nextValue: A, ignoredTransaction: Transaction): Unit = {
     //dom.console.log(s">>>>WBS.onNext($nextValue): isStarted=$isStarted")
     //dom.console.log(sources)
 
@@ -57,21 +55,18 @@ class EventBusStream[A] private[eventbus] (writeBus: WriteBus[A]) extends EventS
     fireError(nextError, sharedTransaction)
   }
 
-  override protected[airstream] def onError(nextError: Throwable, transaction: Transaction): Unit = {
+  override protected def onError(nextError: Throwable, transaction: Transaction): Unit = {
     new Transaction(fireError(nextError, _))
   }
 
   override protected[this] def onStart(): Unit = {
     sourceStreams.foreach(_.addInternalObserver(this))
+    super.onStart()
   }
 
   override protected[this] def onStop(): Unit = {
     // dom.console.log("EventBusStream STOPPED!", this.toString)
     sourceStreams.foreach(sourceStream => Transaction.removeInternalObserver(sourceStream, observer = this))
+    super.onStop()
   }
-}
-
-object EventBusStream {
-
-
 }

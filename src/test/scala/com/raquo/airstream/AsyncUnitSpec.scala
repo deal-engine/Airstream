@@ -2,12 +2,11 @@ package com.raquo.airstream
 
 import org.scalatest.funspec.AsyncFunSpec
 import org.scalatest.matchers.should.Matchers
-
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.scalajs.js
 import scala.util.Try
 
-class AsyncUnitSpec extends AsyncFunSpec with Matchers {
+abstract class AsyncUnitSpec extends AsyncFunSpec with Matchers {
 
   implicit override def executionContext: ExecutionContext = scala.scalajs.concurrent.JSExecutionContext.Implicits.queue
 
@@ -17,7 +16,7 @@ class AsyncUnitSpec extends AsyncFunSpec with Matchers {
 
   def delay[V](millis: Int)(value: => V): Future[V] = {
     val promise = Promise[V]()
-    js.timers.setTimeout(millis) {
+    js.timers.setTimeout(millis.toDouble) {
       promise.complete(Try(value))
     }
     promise.future.map(identity)(executionContext)

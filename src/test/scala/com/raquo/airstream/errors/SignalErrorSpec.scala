@@ -1,11 +1,10 @@
 package com.raquo.airstream.errors
 
 import com.raquo.airstream.UnitSpec
-import com.raquo.airstream.core.{AirstreamError, Observer}
+import com.raquo.airstream.core.{AirstreamError, EventStream, Observer}
 import com.raquo.airstream.eventbus.EventBus
-import com.raquo.airstream.eventstream.EventStream
 import com.raquo.airstream.fixtures.{Calculation, Effect, TestableOwner}
-import com.raquo.airstream.signal.{Val, Var}
+import com.raquo.airstream.state.{Val, Var}
 import org.scalatest.BeforeAndAfter
 
 import scala.collection.mutable
@@ -194,7 +193,7 @@ class SignalErrorSpec extends UnitSpec with BeforeAndAfter {
 
     val signal = EventStream.fromSeq(List(1, -2, 3), emitOnce = true).map { num =>
       if (num < 0) throw err1 else num
-    }.toSignal(0).map(Calculation.log("signal", calculations))
+    }.startWith(0).map(Calculation.log("signal", calculations))
 
     calculations shouldEqual mutable.Buffer()
 
@@ -222,7 +221,7 @@ class SignalErrorSpec extends UnitSpec with BeforeAndAfter {
 
     val bus = new EventBus[Int]
 
-    val signalUp = bus.events.toSignal(-1).foldLeft { num =>
+    val signalUp = bus.events.startWith(-1).foldLeft { num =>
       if (num < 0) {
         throw err1
       } else num
@@ -275,7 +274,7 @@ class SignalErrorSpec extends UnitSpec with BeforeAndAfter {
 
     val bus = new EventBus[Int]
 
-    val signalUp = bus.events.toSignal(-1).foldLeftRecover(tryNum => tryNum.map { num =>
+    val signalUp = bus.events.startWith(-1).foldLeftRecover(tryNum => tryNum.map { num =>
       if (num < 0) {
         throw err1
       } else num

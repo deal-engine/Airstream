@@ -2,10 +2,8 @@ package com.raquo.airstream.core
 
 import com.raquo.airstream.UnitSpec
 import com.raquo.airstream.eventbus.EventBus
-import com.raquo.airstream.eventstream.EventStream
 import com.raquo.airstream.fixtures.{Calculation, Effect, TestableOwner}
-import com.raquo.airstream.ownership.Owner
-import com.raquo.airstream.signal.Var
+import com.raquo.airstream.state.Var
 
 import scala.collection.mutable
 
@@ -228,11 +226,11 @@ class GlitchSpec extends UnitSpec {
     // X = D + E
 
     val streamTupleAB = busA.events.combineWith(busB.events)
-    val streamC = streamTupleAB.map2(_ + _).map(Calculation.log("C", calculations))
-    val streamD = busB.events.combineWith(streamC).map2(_ + _).map(Calculation.log("D", calculations))
-    val streamE = busA.events.combineWith(streamC).map2(_ + _).map(Calculation.log("E", calculations))
+    val streamC = streamTupleAB.mapN(_ + _).map(Calculation.log("C", calculations))
+    val streamD = busB.events.combineWith(streamC).mapN(_ + _).map(Calculation.log("D", calculations))
+    val streamE = busA.events.combineWith(streamC).mapN(_ + _).map(Calculation.log("E", calculations))
 
-    val streamX = streamD.combineWith(streamE).map2(_ + _)
+    val streamX = streamD.combineWith(streamE).mapN(_ + _)
       .map(Calculation.log("X", calculations))
 
     streamX.foreach(effects += Effect("X", _))
@@ -312,11 +310,11 @@ class GlitchSpec extends UnitSpec {
     busA.writer.addSource(streamB.map(_ * 10).map(Calculation.log("B x 10", calculations)))
     busB.writer.addSource(streamA.filter(_ <= 100).map(_ + 1))
 
-    val streamD = streamA.combineWith(streamB).map2((x, y) => {
+    val streamD = streamA.combineWith(streamB).mapN((x, y) => {
       // println(x, y)
       x + y
     })
-      //.map2(_ + _)
+      //.mapN(_ + _)
       .map(Calculation.log("D", calculations))
 
     streamB
@@ -433,7 +431,7 @@ class GlitchSpec extends UnitSpec {
       EventStream.merge(
         EventStream.fromValue(n - 2, emitOnce = true),
         EventStream.fromValue(n - 1, emitOnce = true)
-      ).map(Append)
+      ).map(Append.apply)
     }
 
     val updatedState =

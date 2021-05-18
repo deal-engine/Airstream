@@ -12,7 +12,7 @@ Airstream is a small state propagation and streaming library. Primary difference
 
 - **One integrated system for two core types of observables** – Event streams alone are not a good enough abstraction for anything other than events.
   - EventStream for events (lazy, no current value)
-  - Signal for state (lazy, has current value)
+  - Signal for state (lazy, has current value, only state-safe operators)
 
 - **Small size, simple implementation** – easy to understand, easy to create custom observables. Does not bloat your Scala.js bundle size.
 
@@ -21,7 +21,7 @@ Airstream has a very generic design, but is primarily intended to serve as a rea
 I created Airstream because I found existing solutions were not suitable for building reactive UI components. My original need for Airstream was to replace the previous reactive layer of [Laminar](https://laminar.dev), but I'll be happy to see it used by other reactive UI libraries as well. Another piece of Laminar you can reuse is [Scala DOM Types](https://github.com/raquo/scala-dom-types).
 
 ```
-"com.raquo" %%% "airstream" % "0.11.1"  // Requires Scala.js >= 1.1.0
+"com.raquo" %%% "airstream" % "0.13.0"  // Requires Scala.js >= 1.5.0
 ```
 
 
@@ -49,10 +49,16 @@ I created Airstream because I found existing solutions were not suitable for bui
     * [EventStream.fromSeq](#eventstreamfromseq)
     * [EventStream.periodic](#eventstreamperiodic)
     * [EventStream.empty](#eventstreamempty)
+    * [EventStream.withCallback and withObserver](#eventstreamwithcallback-and-withobserver)
     * [EventBus](#eventbus)
     * [Var](#var)
     * [Val](#val)
-    * [Custom Observables](#custom-observables)
+    * [Ajax](#ajax)
+    * [Websockets](#websockets)
+    * [DOM Events](#dom-events)
+    * [Custom Event Sources](#custom-event-sources)
+    * [Extending Observables](#extending-observables)
+  * [Sources & Sinks](#sources--sinks)
   * [FRP Glitches](#frp-glitches)
     * [Other Libraries](#other-libraries)
     * [Topological Rank](#topological-rank)
@@ -60,11 +66,12 @@ I created Airstream because I found existing solutions were not suitable for bui
     * [Merge Glitch-By-Design](#merge-glitch-by-design)
     * [Scheduling of Transactions](#scheduling-of-transactions)
   * [Operators](#operators)
+    * [N-arity Operators](#n-arity-operators)
     * [Compose Changes](#compose-changes)
     * [Sync Delay](#sync-delay)
     * [Splitting Observables](#splitting-observables)
     * [Flattening Observables](#flattening-observables)
-    * [Debugging Operators](#debugging-operators)
+  * [Debugging](#debugging)
   * [Error Handling](#error-handling)
 * [Limitations](#limitations)
 * [My Related Projects](#my-related-projects)
@@ -207,7 +214,9 @@ You can use `stream.withCurrentValueOf(signal).map((lastStreamEvent, signalCurre
 
 If you don't need lastStreamEvent, use `stream.sample(signal).map(signalCurrentValue => ???)` instead. Note: both of these output streams will emit only when `stream` emits, as documented in the code. If you want updates from signal to also trigger an event, look into the `combineWith` operator.
 
-If you want to get a Signal's current value without the complications of sampling, or even if you just want to make sure that a Signal is started, just call `observe` on it. That will add a noop observer to the signal, and return a `SignalViewer` instance which being a `StrictSignal`, does expose `now()` and `tryNow()` methods that safely provide you with its current value.
+Note: `withCurrentValueOf` and `sample` operators are also available on signals, not just streams.
+
+If you want to get a Signal's current value without the complications of sampling, or even if you just want to make sure that a Signal is started, just call `observe` on it. That will add a noop observer to the signal, and return an `OwnedViewer` instance which being a `StrictSignal`, does expose `now()` and `tryNow()` methods that safely provide you with its current value.
 
 
 ### Relationship between EventStream and Signal
@@ -218,7 +227,9 @@ You can `foldLeft(initialValue)(fn)` an EventStream into a Signal, or make a Sig
 
 You can get an EventStream of changes from a Signal – `signal.changes` – this stream will re-emit whatever the parent signal emits (subject to laziness of the stream), minus the Signal's initial value.
 
-If you have an observable, you can refine it to a Signal with `Observable#toSignal(initialIfStream)`, and to a Stream with `Observable#toStreamOrSignalChanges`. As the latter name suggests, if the observable is a Signal, the output stream will contain its changes, not the initial value. 
+If you have an observable, you can refine it to a Signal with `Observable#toWeakSignal` or `Observable#toSignalIfStream(ifStream = streamToSignal)`, and to a Stream with `Observable#toStreamOrSignal(ifSignal = signalToStream)`. For example, if you want to convert `Observable[String]` into `Signal[String]` with empty string as initial value in case this Observable is a stream, use `observable.toSignalIfStream(_.startWith(""))`.
+
+See also: [Sources & Sinks](#sources--sinks)
 
 
 ### Observer
@@ -235,7 +246,13 @@ Observers have a few convenience methods:
 
 `def filter(passes: A => Boolean): Observer[A]` – useful if you have an `Observable` that you need to observe while filtering out some events (there is no `Observable.filter` method, only `EventStream.filter`).
 
-`contracollect[B](pf: PartialFunction[B, A]): Observer[B]` – when you want to both `contramap` and `filter` at once.
+`def contramapSome` is just an easy way to get `Observer[A]` from `Observer[Option[A]]`
+
+`def contracollect[B](pf: PartialFunction[B, A]): Observer[B]` – when you want to both `contramap` and `filter` at once.
+
+`def contramapOpt[B](project: B => Option[A]): Observer[B]` – like `contracollect` but designed for APIs that return Options, such as `NonEmptyList.fromList`.
+
+`delay(ms: Int)` – creates an observer that calls the original observer after the specified delay (for both events and errors)
 
 `Observer.combine[A](observers: Observer[A])` creates an observer that triggers all of the observers provided to it. Unlike `Observer[A](nextValue => observers.foreach(_.onNext(nextValue)))`, the combined observer will also trigger its child observers in case of `.onError` (more about that in [Error Handling](#error-handling)).
 
@@ -434,9 +451,25 @@ The underlying `PeriodicEventStream` class offers more functionality, including 
 A stream that never emits any events.
 
 
+#### `EventStream.withCallback` and `withObserver`
+
+`EventStream.withCallback[A]` Creates and returns a stream and an `A => Unit` callback that, when called, passes the input value to that stream. Of course, as streams are lazy, the stream will only emit if it has observers.
+
+```scala
+val (stream, callback) = EventStream.withCallback[Int]
+callback(1) // nothing happens because stream has no observers
+stream.foreach(println)
+callback(2) // `2` will be printed  
+```
+
+`EventStream.withJsCallback[A]` works similarly except it returns a js.Function for easier integration with Javascript libraries.
+
+`EventStream.withObserver[A]` works similarly but creates an observer, which among other conveniences passes the errors that it receives into the stream.
+
+
 #### EventBus
 
-`new EventBus[MyEvent]` is the general-purpose way to create a stream on which you can manually trigger events. The resulting EventBus exposes two properties:
+`new EventBus[MyEvent]` is a more powerful way to create a stream on which you can manually trigger events. The resulting EventBus exposes two properties:
 
 **`events`** is the stream of events emitted by the EventBus.
 
@@ -444,7 +477,9 @@ A stream that never emits any events.
 
 WriteBus extends Observer, so you can call `onNext(newEventValue)` on it, or pass it as an observer to another stream's `addObserver` method. This will cause the event bus to emit `newEventValue` in a new transaction.
 
-You can also call `addSource(otherStream)(owner)` on it, and the event bus will re-emit every event emitted by that stream. This is somewhat similar to adding `writer` as an observer to `otherStream`, except this will not cause `otherStream` to be started unless/until the EventBus's own stream is started (see [Laziness](#laziness)).
+Or you can just call `eventBus.emit(newEvent)` for the same effect.
+
+What sets EventBus apart from e.g. `EventStream.withObserver` is that you can also call `eventBus.addSource(otherStream)(owner)`, and the event bus will re-emit every event emitted by that stream. This is somewhat similar to adding `writer` as an observer to `otherStream`, except this will not cause `otherStream` to be started unless/until the EventBus's own stream is started (see [Laziness](#laziness)).
 
 You've probably noticed that `addSource` takes `owner` as an implicit param – this is for memory management purposes. You would typically pass a WriteBus to a child component if you want the child to send any events to the parent. Thus, we want `addSource` to be automatically undone when said child is discarded (see [Ownership](#ownership)), even if `writer.stream` is still being observed.
 
@@ -494,17 +529,114 @@ Creating a Var is straightforward: `Var(initialValue)`, `Var.fromTry(tryValue)`.
 
 ##### Simple Updates
 
-You can update a Var using one of its methods: `set(value)`, `setTry(Try(value))`, `update(currentValue => nextValue)`, `tryUpdate(currentValueTry => Try(nextValue))`. Note that `update` will throw if the Var's current value is an error (thus `tryUpdate`).
+You can update a Var using one of its methods: `set(value)`, `setTry(Try(value))`, `update(currentValue => nextValue)`, `tryUpdate(currentValueTry => Try(nextValue))`. Note that `update` will send a VarError into unhandled if the Var's current value is an error. Use `set*` or `tryUpdate` methods to update failed Vars.
 
-Every Var also provides an Observer (`.writer`) that you can use where an Observer is expected, or if you want to provide your code with write-only access to a Var.
+##### Observers Feeding into Var
+
+Every Var provides a `writer` which is an Observer that writes input values into the Var. It may be useful to provide your code with write-only access to a Var, or to a subset of the data in the Var by means of the Observer's `contramap` method.
+
+In addition to `writer`, Var also offers `updater`s, making it easy to create an Observer that updates the Var based on both the Observer's input value and the Var's current value:
+
+```scala
+val v = Var(List(1, 2, 3))
+val adder = v.updater[Int]((currValue, nextInput) => currValue :+ nextInput)
+
+adder.onNext(4)
+v.now() // List(1, 2, 3, 4)
+
+val inputStream: EventStream[Int] = ???
+
+inputStream.foreach(adder)
+inputStream --> adder // Laminar syntax
+```
+
+`updater` will send a VarError into unhandled if you ask it to update a Var that is in a failed state. In such cases, use `writer` or `tryUpdater` instead.
+
+Vars of Options, i.e. `Var[Option[A]]`, also offer `someWriter: Observer[A]` for convenience.
 
 ##### Reading Values from a Var
 
-You can get the Var's current value using `now()` and `tryNow()`. Similar to `update`, `now` throws if the current value is an error. Var also exposes a `signal` of its values.
+You can get the Var's current value using `now()` and `tryNow()`. `now` throws if the current value is an error. Var also exposes a `signal` of its values.
 
-Var follows **strict** (not lazy) execution – it will update its current value as instructed even if its signal has no observers. Unlike most other signals, the Var's signal is also strict – its current value matches the Var's current value at all times regardless of whether it has observers. Of course, any downstream observables that depend on the Var's signal are still lazy as usual.
+SourceVar, i.e. any Var that you create with `Var(...)`, follows **strict** (not lazy) execution – it will update its current value as instructed even if its signal has no observers. Unlike most other signals, the Var's signal is also strict – its current value matches the Var's current value at all times regardless of whether it has observers. Of course, any downstream observables that depend on the Var's signal are still lazy as usual.
 
-Being a `StrictSignal`, the signal also exposes `now` and `tryNow` methods, so if you need to provide your code with read-only access to a Var, sharing only its signal is the way to go. 
+Being a `StrictSignal`, the signal also exposes `now` and `tryNow` methods, so if you need to provide your code with read-only access to a Var, sharing only its signal is the way to go.
+
+##### Var Transaction Delay
+
+Var emits every event in a new [transaction](#transactions). This has important ramifications when writing to and reading from a Var. Consider the following code:
+
+```scala
+val myVar = Var(0)
+
+println("Start")
+
+myVar.set(1)
+println(s"After set: ${myVar.now()}")
+
+myVar.update(_ + 1)
+println(s"After update: ${myVar.now()}")
+
+new Transaction { _ =>
+  println(s"After trx: ${myVar.now()}")
+}
+
+println("Done")
+```
+
+If you put this code in your app's `main` method or inside a `setTimeout` callback, it will print:
+
+```
+Start
+After set: 1
+After update: 2
+After trx: 2
+Done
+```
+
+But if you try to run this same code _while another transaction is being executed_, for example inside one of your observers, in response to an incoming stream event, this is what will be printed:
+
+```
+Start
+Done
+After set: 0
+After update: 0
+After trx: 2
+```
+
+Why the difference? Var's current value exposed by `now()` only updates when the Var emits the updated value, and as we now know, this always happens in a new transaction. But we ran our code inside an observer, that is, while another transaction was running. And the new transaction will only run after the current transaction has finished propagating, so the Var' current value will not update until then.
+
+This is why reading `myVar.now()` after calling `myVar.set(1)` gives you a stale value in this case. Var tries very hard to do the right thing though. While you can't expect to see the new value in `now()`, the `update` method does provide the updated value, `1`, as the input to its callback. This is because the update callback is also scheduled for a new transaction, and so it is executed after the transaction in which the Var's value was set to `1` has finished propagating.
+
+Finally, in both cases the code prints "After trx: 2". This is because that println is only executed in a new transaction. Similar to the update callback, this only gets run when the previously scheduled transactions have finished propagating, so it will always see the final Var value.
+
+So there you have it, you have two ways to read the Var's **new** current value: either call `now()` inside a new transaction, or use `update`. And of course you can also listen to the Var's signal.
+
+Keep in mind that transaction scheduling is fully synchronous, we do not introduce an asynchronous delay anywhere, we merely order the execution chunks to make the maximum amount of sense possible. Read more about transaction scheduling in the [Transactions](#transactions) section.
+
+##### Derived Vars
+
+If you have a `Var[A]`, you can get zoomed / derived `Var[B]` by providing `A => B`, `B => A`, and an owner. The result is a `DerivedVar`, essentially a combination of `var.signal.map` and `writer.contramap` packaged in a Var, and so to simulate the strictness of Var, creating DerivedVar requires an owner.
+
+When you have a derived var, updates to it are propagated to the source var and vice versa, as long as derived var's signal has listeners. Don't try to set/update a derived Var's value when it has no listeners. The value will not be updated, and Airstream will emit an unhandled error.
+
+```scala
+val owner: Owner = ???
+val source = Var(1)
+val derived = source.zoom(_ + 100)(_ - 100)(owner)
+
+source.set(2) // source.now() == 2, derived.now() == 102
+
+derived.set(103) // source.now() == 3, derived.now() == 103
+
+owner.killSubscriptions()
+
+source.set(3) // derived var did not update: derived.now() == 102
+
+derived.set(104) // neither var updated: source.now() == 3, derived.now() == 103
+```
+
+Note: DerivedVar starts out with a subscription owned by `owner`, that counts as a listener of course. However, just like `OwnedSignal` in general, if it obtains any other listeners, it will continue running even if the original owner kills its subscription.
 
 ##### Batch Updates
 
@@ -529,10 +661,11 @@ Batch updates are also atomic in the following ways:
 
 Also, since an Airstream observable can't emit more than once per transaction, the inputs to batch Var methods must have no duplicate vars. For example, you can't do this: `Var.set(var1 -> 1, var1 -> 2, var2 -> 3)`. Airstream will detect that you're attempting to put two events into `var1` in the same transaction, and will throw. Use two separate calls if you want to send two updates into the same Var.  
 
+Keep in mind that derived vars count as the underlying source vars for duplicate detection purposes, so you can't update vars `var1` and `var1.zoom(fa)(fb)` in the same transaction.
+
 Those are the only ways in which setting / updating a Var can throw an error. If any of those happen when batch-updating Var values, Airstream will throw an error, and all of the involved Vars will fail to update, keeping their current value.
 
-Remember that this atomicity guarantee only applies to failures which would have caused an individual `update` / `tryUpdate` call to throw. For example, if the `mod` function provided to `update` throws, `update` will not throw, it will instead successfully set that Var `Failure(err)`. 
-
+Remember that this atomicity guarantee only applies to failures which would have caused an individual `update` / `tryUpdate` call to throw. For example, if the `mod` function provided to `update` throws, `update` will not throw, it will instead successfully set that Var `Failure(err)`.
 
 
 #### Val
@@ -542,13 +675,168 @@ Remember that this atomicity guarantee only applies to failures which would have
 Val is useful when a component wants to accept either a Signal or a constant value as input. You can just wrap your constant in a Val, and make the component accept a `Signal` (or a `StrictSignal`) instead.
 
 
-#### Custom Observables
+#### Ajax
 
-EventBus is a very generic solution that should suit most needs, even if perhaps not very elegantly sometimes.
+Airstream now has a built-in way to perform Ajax requests:
 
-You can create your own observables that emit events in their own unique way by wrapping or extending EventBus (easier) or extending Observable (more work and knowledge required, but rewarded with better behavior)).
+```scala
+AjaxEventStream
+  .get("/api/kittens") // EventStream[dom.XMLHttpRequest]
+  .map(req => req.responseText) // EventStream[String]
+```
 
-Unfortunately I don't have enough time to describe how to create custom observables in detail right now. You will need to read the rest of the documentation and the source code – you will see how other observables such as MapEventStream or FilterEventStream are implemented. Airstream's source code should be easy to comprehend. It is clean, small (a bit more than 1K LoC with all the operators), and does not use complicated implicits or hardcore functional stuff.
+Methods for POST, PUT, PATCH, and DELETE are also available.
+
+The request is made every time the stream is started. If the stream is stopped while the request is pending, the old request will not be cancelled, but its result will be discarded.
+
+If the request times out, is aborted, returns an HTTP status code that isn't 2xx or 304, or fails in any other way, the stream will emit an `AjaxStreamError`.
+
+If you want a stream that never fails, a stream that emits an event regardless of all those errors, call `.completeEvents` on your ajax stream.
+
+You can listen for `progress` or `readyStateChange` events by passing in the corresponding observers to `AjaxEventStream.get` et al, for example:
+
+```scala
+val (progressObserver, $progress) = EventStream.withObserver[(dom.XMLHttpRequest, dom.ProgressEvent)]
+
+val $request = AjaxEventStream.get(
+  url = "/api/kittens",
+  progressObserver = progressObserver
+)
+
+val $bytesLoaded = $progress.mapN((xhr, ev) => ev.loaded)
+```
+
+In a similar manner, you can pass a `requestObserver` that will be called with the newly created `dom.XMLHttpRequest` just before the request is sent. This way you can save the pending request into a Var and e.g. `abort()` it if needed.
+
+Warning: dom.XmlHttpRequest is an ugly, imperative JS construct. We set event callbacks for `onload`, `onerror`, `onabort`, `ontimeout`, and if requested, also for `onprogress` and `onreadystatechange`. Make sure you don't override Airstream's listeners in your own code, or this stream will not work properly.
+
+
+#### Websockets
+
+Airstream has no official websockets integration yet.
+
+For several users' implementations, search Laminar gitter room, and the issues in this repo.
+
+
+#### DOM Events
+
+```scala
+val element: dom.Element = ???
+DomEventStream[dom.MouseEvent](element, "click") // EventStream[dom.MouseEvent]
+```
+
+This stream, when started, registers a `click` event listener on `element`, and emits all events the listener receives until the stream is stopped, at which point the listener is removed.
+
+Airstream does not know the names & types of DOM events, so you need to manually specify both. You can get those manually from MDN or programmatically from event props such as `onClick` available in Laminar. 
+
+`DomEventStream` works not just on elements but on any `dom.raw.EventTarget`. However, make sure to check browser compatibility for fancy EventTarget-s such as XMLHttpRequest.
+
+
+
+### Custom Event Sources
+
+If simpler event sources (see above) do not suit your needs, consider using `CustomSource`. This mechanism lets you create a custom stream or signal as long as it does not depend on other Airstream observables. So. it's good for integrating with third party sources of events.
+
+You can create custom event sources using `EventStream.fromCustomSource` and `Signal.fromCustomSource`, which are convenience wrappers over the underlying  `CustomEventSource` and `CustomSignalSource` classes. This section will explain how to use those underlying classes, and after that the understanding of `fromCustomSource` methods should come naturally.
+
+Airstream's `DomEventStream.apply` creates a stream of events by wrapping the DOM API into `CustomStreamSource`. Let's see how it works:
+
+```scala
+def apply[Ev <: dom.Event](
+  eventTarget: dom.EventTarget,
+  eventKey: String,
+  useCapture: Boolean = false
+): EventStream[Ev] = {
+
+  CustomStreamSource[Ev]( (fireValue, fireError, getStartIndex, getIsStarted) => {
+
+    val eventHandler: js.Function1[Ev, Unit] = fireValue
+
+    CustomSource.Config(
+      onStart = () => {
+        eventTarget.addEventListener(eventKey, eventHandler, useCapture)
+      },
+      onStop = () => {
+        eventTarget.removeEventListener(eventKey, eventHandler, useCapture)
+      }
+    )
+  })
+}
+```
+
+When we create a `CustomStreamSource`, we need to provide a callback that accepts some useful arguments and returns an instance of `CustomSource.Config`, which is essentially a bundle of two callbacks: `onStart` which fires when your stream is started, and `onStop` which fires when your stream is stopped (see [Laziness](#laziness)).
+
+Here we see that DomEventStream registers `fireValue` as an event listener on the DOM element when the stream starts, and unregisters that listener when the stream stops. This way the resulting stream will properly clean up its resources.
+
+Side note: `val eventHandler` is cached to avoid implicitly creating a new instance of `js.Function1`. We need to keep this exact reference to be able to unregister the listener. Just a bit of Scala-vs-js friction here.
+
+Let's look at the methods that `CustomStreamSource` makes available to us:
+
+* **fireValue** - call this with a value to make the custom stream emit that value in a new transaction
+* **fireError** - call this with a Throwable to make the custom stream emit an error (see [Error Handling](#error-handling))
+* **getStartIndex** – call this to check how many times the custom stream has been started. Airstream uses this for the `emitOnce` param in streams like `EventStream.fromSeq`.
+* **getIsStarted** – call this to check if the custom stream is currently started 
+
+`CustomSource.Config` instances have a `when(passes: () => Boolean)` method that returns a config that, when the predicate does not pass, will **not** call your `onStart` callback when the stream starts, and will not call your `onStop` callback when the stream is subsequently stopped (we assume that your `onStop` code cleans up after your `onStart` code). To clarify, the predicate is evaluated when the custom stream is about to start. And the stream **will* actually start – you can't break this part of Airstream contract – the predicate only controls whether your callbacks defined in the config will be run. You can see this predicate being useful to implement the `emitOnce` param in streams like `EventStream.fromSeq`.
+
+**CustomSignalSource** is the Signal version of CustomStreamSource, and works similarly, just with a slightly different set of params:
+
+```scala
+class CustomSignalSource[A] (
+  getInitialValue: => Try[A],
+  makeConfig: (SetCurrentValue[A], GetCurrentValue[A], GetStartIndex, GetIsStarted) => CustomSource.Config
+)
+```
+
+`fireValue` and `fireError` are merged into one `setCurrentValue` callback that expects a `Try[A]`, and this being a Signal, we also provide a `getCurrentValue` param to check the custom signal's current value.
+
+Generally signals need to be started in order for their current value to update. Stopped signals generally don't update without listeners, unless they are a `StrictSignal` like `Var#signal`. `CustomSignalSource` is not a `StrictSignal` so there is no expectation for it to keep updating its value when it's stopped. Users should keep listening to signals that they care about.
+
+
+#### Extending Observables
+
+If you need a custom observable that depends on another Airstream observable, you can subclass WritableEventStream or WritableSignal. See existing classes for inspiration, such as `MapSignal` and `MapEventStream`.
+
+You will likely want to mix in `SingleParentObservable` trait and either `InternalTryObserver` (for signals) or `InternalNextErrorObserver` (for streams). Then you will just need to implement `onTry` (for signals) or `onNext` / `onError` (for streams) methods, which will be triggered when the parent observable emits. In turn, those methods should call `fireValue`, `fireError` or `fireTry` to make your custom observable emit a value. Also, for signals you will need to implement `initivalValue` which you should derive from the parent observable's current value (NOT from the parent observable's `initialValue`).
+
+If you want to put asynchronous logic in your observable, make sure to have a good understanding of Airstream transactions and topoRank, and consult with other asynchronous observables implementations such as `DelayEventStream`.
+
+If your custom observable does not depend on any Airstream observables, e.g. if you're writing a compatibility layer for another streaming library, you generally should be able to use the simpler [Custom Sources](#custom-sources) API.
+
+
+##### Accessing protected members
+
+Some values and methods that you might want to access on observables are `protected`. That means that the compiler will only let you access those values and methods on the same instance. So, you can read `this.topoRank`, but you can't read `parentObservable.topoRank`. To get around this, use the `Protected` object: `Protected.topoRank(parentObservable)`.
+
+Aside from `topoRank`, you will need to access `tryNow()` and `now()` this way, e.g. when implementing a custom signal's `initialValue`. These methods require an implicit evidence of type `Protected`, which is automatically in scope if you're calling these methods from inside your custom observable. You're not supposed to access a signal's current value from the outside, without proving that the signal is running (e.g. by subscribing to it), otherwise you might get a stale value.
+
+Honestly all this "protected" business smells funny to me, but I couldn't figure out a better way to allow third party extensions without making these protected members public.
+
+
+
+### Sources & Sinks
+
+A `Source[A]` in Airstream is something that exposes a `toObservable` method, something that can be (explicitly, not implicitly) converted into an `Observable[A]`. For example, the observables themselves are Sources, but so are EventBus-es (`def toObservable = this.events`) and Var-s (`def toObservable = this.signal`).
+
+Source is further subtyped into – `EventSource` (EventStream, EventBus) and `SignalSource` (Signal, Var). Predictably, `eventSource.toObservable` returns an EventStream, whereas `signalSource.toObservable` returns a Signal.
+
+These types are useful when you want to create a method that can accept "anything that you can get a stream from", including not just observables but things like event buses and futures. For example, it's used in Laminar:
+
+```scala
+val textBus = new EventBus[String]
+val textFuture = Future.successful("")
+val elementFuture = Future.successful(span(""))
+div(value <-- textBus.events)
+div(value <-- textBus) // Also works because this <-- accepts Source[String]
+div(value <-- textFuture) // Works via Future[A] => EventSource[A] implicit conversion
+div(child.maybe <-- elementFuture) // Works via Future[A] => SignalSource[Option[A]] implicit
+```
+
+The counterparty to `Source` in Airstream is `Sink`. `Sink[A]` is something that exposes a `toObserver` method that can be explicitly (not implicitly) convert a Sink to an Observer. So Observers are sinks, as are EventBus-es and Var-s, and even `js.Function1[A, Unit]` has an implicit conversion to `Sink[A]`.
+
+However, there is no implicit conversion from `A => Unit` to `Sink` because unfortunately  Scala requires a lambda's type param to have a type ascription to implicitly convert it into a Sink[A], so syntax like `div(value <-- (_ => println("x"))` would not be possible with such an implicit defined. In Laminar we get around this by overloading the `<--` method to accept either a `Sink[A]` or `A => Unit`. If you need this conversion, just wrap your function in `Observer`. You'll still need to ascribe the types though.
+
+Speaking of implicits, why don't we have EventBus extend both `EventStream[A]` and `Observer[A]` instead of having separate Source and Sink types? On a technical level simply because Observable and Observer have overlapping methods defined, such as `filter` and `delay`, but more importantly, it would just be confusing. The whole point of Source and Sink is to not expose any methods other than toObservable, so that these types are only used as input types to methods that the developer wants to be flexible.
 
 
 
@@ -691,9 +979,42 @@ Remember that all of this happens synchronously. There can be no async boundarie
 
 ### Operators
 
-Airstream offers standard observables operators like `map` / `filter` / `compose` / `combineWith` etc. You will need to read the [API doc](https://javadoc.io/doc/com.raquo/airstream_sjs1_2.13/latest/com/raquo/airstream/index.html) or the actual code or use IDE autocompletion to discover those that aren't documented here or in other section of the Documentation. In the code, see `Observable`, `EventStream`, and `Signal` traits and their companion objects.
+Airstream offers standard observables operators like `map` / `filter` / `compose` / `combineWith` etc. You will need to read the [API doc](https://javadoc.io/doc/com.raquo/airstream_sjs1_2.13/latest/com/raquo/airstream/index.html) or the actual code or use IDE autocompletion to discover those that aren't documented here or in other section of the Documentation. In the code, see `BaseObservable`, `Observable`, `EventStream`, and `Signal` traits and their companion objects.
 
 Some of the more interesting / non-standard operators are documented below:
+
+
+#### N-arity Operators
+
+Airstream offers several methods and operators that work on up to 9 observables or tuples up to Tuple9:
+
+**mapN((a, b, ...) => ???)**
+
+Available on observables of `(A, B, ...)` tuples
+
+**filterN((a, b, ...) => ???)**
+
+Available on observables of `(A, B, ...)` tuples
+
+**observableA.combineWith(observableB, observableC, ...)**
+
+There is a bit of magic to this method for convenience. `streamOfA.combineWith(streamOfB)` returns a stream of `(A, B)` tuples only if neither A nor B are tuple types. Otherwise, `combineWith` flattens the tuple types, so for example both `streamOfA.combineWith(streamOfB).combineWith(streamOfC)` and `streamOfA.combineWith(streamOfB, streamOfC)` return a stream of `(A, B, C)`, **not** `((A, B), C)`. We achieve this using implicit `Composition` instances provided by the [tuplez](https://github.com/tulz-app/tuplez#composition) library.
+
+**observableA.combineWithFn(observableB, ...)((a, b, ...) => ???)** 
+
+Similar to `combineWith`, but you get to provide the combinator instead of relying on tuples. For example: `streamOfX.combineWithFn(streamOfY)(Point)` where Point is `case class Point(x: Int, y: Int)`.
+
+**EventStream.combine(streamA, streamB, ...)** et al.
+
+N-arity `combine` and `combineWithFn` methods are also available on EventStream and Signal companion objects.
+
+**observableA.withCurrentValueOf(signalB, signalC, ...)**
+
+Same auto-flattening of tuples as `combineWith`.
+
+**observable.sample(signalA, signalB, ...)**
+
+Returns an observable of `(A, B, ...)` tuples
 
 
 #### Compose Changes
@@ -870,6 +1191,7 @@ Aside from the `def flatMap[...](implicit strategy: FlattenStrategy[...])` metho
 * The flattened signal follows standard signal expectations – it's lazy. If you stop observing it, its current value might get stale even if the signal that it's tracking has other observers.
 
 **`SwitchFutureStrategy`** flattens an `Observable[Future[A]]` into an `EventStream[A]`. We first create an event stream from each emitted future, then flatten the result using `SwitchStreamStrategy`. So this ends up behaving very similarly, producing a stream that emits the value from the last future emitted by the parent observable, discarding the values of all previously emitted futures.
+* As of Airstream v0.12.0, this strategy is the default for flattening Observable[Future[A]]. Previously there was no default for such observables so you had to manually specify a strategy.
 
 To summarize, the above strategies result in an observable that imitates the latest stream / signal / future emitted by the parent observable. So as soon as the parent observable emits a new future / signal / stream, it stops listening for values produced by previously emitted futures / signals / streams.
 
@@ -882,19 +1204,99 @@ All built-in strategies result in observables that emit each event in a new tran
 `SwitchFutureStrategy`, `ConcurrentFutureStrategy`, and `OverwriteFutureStrategy` treat futures slightly differently than `EventStream.fromFuture`. Namely, if the parent observable emits a future that has already resolved, it will be treated as if the future has just resolved, i.e. its value will be emitted (subject to the strategy's normal logic). This is useful to avoid "swallowing" already resolved futures and enables easy handling of use cases such as cached or default responses. If this behaviour is undesirable you can easily define an alternative flattening strategy – it's a matter of flipping a single boolean in the relevant classes.
 
 
-#### Debugging Operators
+### Debugging
 
-Observable trait includes a few operators for debugging:
-* `debugLog` (log events)
-* `debugBreak` (invoke a JS debugger on every event)
-* `debugSpy` (call a function on every event)
-
-You can actually invoke the debugger (or logger) on a subset of events, like so:
+#### Debugging Observables
 
 ```scala
-val myIntStream: EventStream[Int] = ???
-val debuggedStream: EventStream[Int] = myIntStream.debugBreak(_ % 2 == 0) // break on even numbers only
-``` 
+val stream: EventStream[Int] = ???
+val useJsLogger: Boolean = false
+
+val debugStream = stream
+  .debugWithName("MyStream") // optional: use this prefix when logging below
+  .debugLogEvents(when = _ < 0, useJsLogger) // optional: only log negative numbers
+  .debugSpyStarts(topoRank => ???)
+  .debugBreakErrors()
+
+// Before:
+stream.addObserver(obs)
+
+// After: when debugging, replace with:
+debugStream.addObserver(obs)
+```
+
+Airstream offers many debugging operators for observables, letting you run a callbacks (`debugSpy*`), log (`debugLog*`), or set a JS breakpoint (`debugBreak*`) at the most important times in the observable's lifecycle, including when emitting events or errors, starting or stopping, and evaluating the initial value (for signals). Those methods are available implicitly on every observable via `DebuggableObservable` and `DebuggableSignal`.
+
+To debug an observable, call one of the available debug* methods to produce a new observable that listens to the original one and re-emits all its events and errors **and** also performs the specified debug action.
+
+For example, `stream.debugLog()` will create a new observable that will simply print every event **and error** that it emits, that `stream` feeds to it, and `stream.debugLog().debugBreakErrors()` will do the same plus also set a JS breakpoint on errors in `stream`.
+
+Very importantly, `debugLog` does **not** monkey-patch the original observable to add debugging functionality to it. We create a new observable that depends on the original, and debug _that_. This is true for every debug operator: in `stream.debugLog().debugBreakErrors()`, `debugLog()` creates an observable based on `stream`, and `debugBreakErrors()` creates an observable based on `stream.debugLog()`.
+
+To make it crystal clear: `stream.debugLog()` will only log the events that `stream.debugLog()` emits, so you need to make sure to listen to it, not (just) to `stream`. Easiest is to just use `stream.debugLog()` in place of the original `stream` in your code.
+
+Another important consideration is the **order** of debug procedures. It follows the propagation order. For example, in `stream.debugLog().debugSpy(fn)` the observable `stream.debugLog()` will obviously emit before the observable `stream.debugLog().debugSpy(fn)` emits, and so you will see the event printed first, and only after that will `fn` be called with that event. So if you're ever confused about why your debugger prints stuff in a weird order (e.g. event fired before stream is started), make sure your debug operators are in the expected order.
+
+You can also use `debugWith(debugger)` method instead of `debug*` methods to provide an `ObservableDebugger` with all of the behaviour that you want, instead of adding it piece by piece.
+
+Also regarding timing, the per-event debuggers like (`debugSpy()` / `debugLog()` / `debugBreak()`) do their thing right _before_ the event is fired (by the debugged observable, not the original), and the start/stop debuggers do their thing right _after_ the observable is started or stopped.
+
+Logging debug operators generally offer an optional `when` filter to reduce noise, and a `useJsLogger` option that you should enable when you're logging native JS values. Logging plain JS objects with `println` will often result in printing `[object Object]`, but JS `dom.console.log` can print them nicely.
+
+Also, your logs will be prefixed with `sourceName` which defaults to `stream.toString` but you can provide a prettier name as a param to the `.debug()` method.
+
+We try to minimize the impact of debugging on the execution of your observable graph. To that end, any errors you throw in the callbacks you provide to `debugSpy*` methods will be reported as unhandled (wrapped in `DebuggerError`), and will not affect the propagation of events.
+
+
+##### displayName
+
+When debugging, it's very useful to name your observables. There are two ways to do this: `stream.setDisplayName("MyStream")` patches `stream` in place to set its `displayName`. It returns the same `stream`, it does **not** create a new observable.
+
+This should be the preferred method for adding **permanent** names to important observables. For example, if you have a global `val AuthSignal: Signal[AuthContext]`, you might want to add `.setDisplayName("AuthSignal")` to its definition.
+
+`displayName`, if explicitly set, is returned by the observable's `toString` method. If not explicitly set, it defaults to `defaultDisplayName`, which in turn defaults to java.Object's default `type@hashcode` toString implementation. If subclassing Observable, you can't override its toString method directly, but you can override `defaultDisplayName`.
+
+`displayName` is of course useful to give human-readable identifiers to observables – seeing `AuthSignal` when print-debugging is much more useful than `MapSignal@f161`.
+
+`displayName` is also prepended to logs produced by `debugLog*` methods. However, given `stream.setDisplayName("MyStream")`, while the `displayName` of `stream` is "MyStream", the `displayName` of `stream.setDisplayName("MyStream").debugLog()` is "MyStream|Debug", to differentiate it from `stream`.
+
+You can of course also `setDisplayName` on the debugged stream directly: `stream.debugLog().setDisplayName("MyDebuggedStream")`, but if you have a _chain_ of debug streams that you want to apply the same name to, you can use the `withDisplayName` method: `stream.withDisplayName("MyDisplayName").debugLogEvents().debugSpyErrors().debugLogStarts()` – in this case all three debug* streams will have their `displayName` set to "MyDisplayName", but `stream` will not. This is because unlike `setDisplayName`, `withDisplayName` does not patch the original observable, it creates a new debug observable and patches that instead. `withDisplayName` works with debug chains because unlike regular observables, debug observables inherit their parent debug observable's `displayName` by default.
+
+Airstream does not require `displayName` to be unique, although if you want to keep your sanity, it should be descriptive enough to clearly tell you which instance it refers to.
+
+
+##### debugTopoRank
+
+[Topological Ranks](#topological-rank) of observables determine the order of Airstream observable graph propagation. The new observables created using `debug*` operators will necessarily have different `topoRank`-s from the original observables. Due to (mostly) depth-first propagation in Airstream, debugging observables generally don't affect your graph's propagation, but if you're specifically debugging an issue related to topoRanks, you might want to avoid adding temporary observables to your observable graph.
+
+You can check the `topoRank` of an observable using `observable.debugTopoRank`. Unlike other `debug*` operators, this one does not affect the observable or create new observables, it just returns the observable's topoRank.
+
+
+#### Debugging Observers
+
+```scala
+val stream: EventStream[Int] = ???
+val obs: Observer[Int] = ???
+
+val debuggedObs = obs
+  .debugWithName("MyObserver")
+  .debugLog()
+  .debugSpyErrors(err => ???)
+
+// Before:
+stream.addObserver(obs)
+
+// After: when debugging, replace with:
+stream.addObserver(debuggedObs)
+```
+
+Observers have debugging functionality very similar to observables, but it works slightly differently. Whereas adding debuggers to observables is similar to mapping them, adding debuggers to observers is similar to **contra**mapping them.
+
+Just as in typical contramapping, the order of execution is reversed, so in the example above `debugSpyErrors()` callback will run before the error is logged by `log()`, and all the debugging happens before the original observer runs.
+
+Similarly to debugged observables, your debuggers throwing do not affect the execution of the observable graph, instead they result in an unhandled `DebuggerError` being reported.
+
+Just like observables, observers can be named using `setDisplayName` and `debugWithName`, with similar semantics. Note that even though observers are executed in "reverse" order (contramap semantics), debugged observers inherit `displayName` from their parent, so the `displayName` of all debugged observers in `obs.debugWithName("MyObserver").debugLog().debugSpy(???)` is "MyObserver".
 
 
 
@@ -946,18 +1348,18 @@ Yes, such an error could have made parts of your application state inconsistent,
 
 #### Airstream's Approach
 
-Airstream aspires to replicate the feel of native exception handling in FRP. However, whereas in imperative code we _want_ Scala to propagate exceptions up the call stack, in Airstream we instead want to propagate errors in observables to their observers and dependent observables.
+Airstream aspires to replicate the feel of native exception handling in FRP. However, whereas in imperative code we typically want to propagate exceptions up the call stack, in Airstream we instead want to propagate errors in observables to their observers and dependent observables.
 
-Think about it this way: in imperative code, you call a function which can throw, and you can either handle it or decide to let your caller handle it, and so on, recursively. In Airstream, you make an observable that depends on another observable which can throw. So you can either handle it, or let any downstream observables or observers handle it.
+Think about it this way: in imperative code, you call a function which can throw, and you can either handle the error or decide to let your caller handle it, and so on, recursively. In Airstream, you make an observable that depends on another observable which can "throw". So you can either handle the error, or let any downstream observables or observers handle it.
 
 This FRP adaptation of classic exception handling is somewhat similar to the approach of Scala.rx, however since Airstream offers a unified reactive system, we have to adjust this basic idea to support event streams as well.
 
-To contrast our approach with conventional streaming libraries, where they see a failed _stream_, we only see a failed _value_, generally expecting the next emitted value to work fine. This is similar to plain Scala exceptions: if a function throws an exception, it does not suddenly become broken forever. You can call it again with perhaps a different value, and it will perhaps not fail that time. Yes, if such an exception produces invalid state, you as a programmer need to address it. Same in Airstream. We give you the tools (more on this below), you do the work, because you're the only one who knows _how_.
+To contrast our approach with conventional streaming libraries: where they see a failed _stream_, we only see a failed _value_, generally expecting the next emitted value to work fine. This is similar to plain Scala exceptions: if a function throws an exception, it does not suddenly become broken forever. You can call it again with perhaps a different value, and it will perhaps not fail that time. Yes, if such an exception produces invalid state, you as a programmer need to address it. Same in Airstream. We give you the tools (more on this below), you do the work, because you're the only one who knows _how_.
 
 We elaborate on the call stack analogy in the subsection [Errors Multiply](#errors-multiply) below.
 
 
-#### Error propagation
+#### Error Propagation
 
 Airstream does not complete or terminate observables on error. Instead, we essentially propagate error values the same way we propagate normal values. Each Observer and InternalObserver has `onNext(A)` and `onError(Throwable)` methods defined, so both observables and observers are capable of accepting error values as inputs.
 
@@ -1024,9 +1426,25 @@ If a `Signal[A]` observable runs into an error that it doesn't handle itself, th
 
 ##### Errors Can Become Wrapped 
 
-Errors originating in an external Observer's onNext and onTry methods are wrapped in `ObserverError` and `ObserverErrorHandlingError` respectively before they are shipped off as unhandled errors.
+Errors originating in observables error handling code (e.g. the `pf` in `stream.recover(pf)`) are wrapped in `ErrorHandlingError`.
 
-Errors originating in observables error handling code (`stream.recover(pf)`) are wrapped in `ErrorHandlingError`.
+In Observers created using Airstream-provided constructors:
+
+* If the user-provided observer callback (e.g. the `handleError` in `Observer.withRecover[Int](cb, handleError)`) throws while processing an incoming error, the error is wrapped into `ObserverErrorHandlingError` and sent off as unhandled error.
+
+* If `handleObserverErrors` constructor param is `true` (that's the default), and the user-provided observer callback throws while processing an incoming event (as opposed to an incoming error), the error is wrapped in `ObserverError` and sent to this same observer's onError method. So, such an observer has a chance to process its own failure. The usefulness of that lies mostly in being able to automatically pass this error up the chain of observers.
+  
+  For example:
+
+  ```scala
+  val sourceObs = Observer.fromTry[Int](println)
+  val derivedObs = sourceObs.contramap[Int] { value =>
+    if (value >= 0) 1 else throw new Exception("negative!")
+  }
+  derivedObs.onNext(1) // prints "Success(1)"
+  derivedObs.onNext(-1) // prints "Failure(ObserverError: java.lang.Exception: negative!)"
+  // no errors are sent into unhandled because `println` is a total function, it handles them all.
+  ```
 
 You can always access the original errors on wrapped errors, and it will always provide you with a stack trace that includes the line where your code failed. Make sure to configure error reporting as well as Scala.js source maps to make use of this in fullOpt / production.
 
@@ -1090,9 +1508,13 @@ stream.recoverToTry.collect { case Failure(err) => err } // EventStream[Throwabl
 
 #### Handling Errors Using Observers
 
-**`Observer.withRecover(onNext, onError: PartialFunction[Throwable, Unit])`** lets you handle some or all of the errors coming from upstream observables. Errors for which `onError` is not defined get reported as unhandled.
+**`Observer.fromTry(nextTry => ...)`** and **`Observer.withRecover(onNext, onError: PartialFunction[Throwable, Unit])`** let you handle all or some of the errors coming from upstream observables. Errors for which `onError` is not defined get reported as unhandled.
 
 **`Observer.ignoreErrors(onNext)`** is similar to `recoverIgnoreErrors` on observables – it simply silences any error it receives, so that it does not get reported as unhandled.
+
+Observers that are derived from other observers, e.g. `observer.contramap[Int](...)`, pass the error to the original observer, and so maintain the original observer's error handling behaviour.
+
+Airstream-provided Observer constructors that let you specify an error handling callback (e.g. `Observer.fromTry` and `Observer.withRecover`) also have a `handleObserverErrors` param. When this param is true (that's the default), if the observer's callback throws while processing an incoming event, the same observer's **error** callback (the onError method) gets called with the error wrapped in ObserverError. This lets you automatically propagate unexpected exceptions up the chain of observers instead of sending the error into unhandled right away. For more details, see [Errors Can Become Wrapped](#errors-can-become-wrapped) above.
 
 
 #### Other Error Handling Considerations
@@ -1114,7 +1536,7 @@ stream.recoverToTry.collect { case Failure(err) => err } // EventStream[Throwabl
 ## Limitations
 
 * Airstream only runs on Scala.js because its primary intended use case is unidirectional dataflow architecture on the frontend. I have no plans to make it run on the JVM. It would require too much of my time and too much compromise, complicating the API to support a completely different environment and use cases. 
-* Airstream has no concept of observables "completing". Personally I don't think this is a limitation, but I can see it being viewed as such. See [Issue #23](https://github.com/raquo/Airstream/issues/23).
+* Airstream has no concept of observables "completing". Personally I don't think this is much of a limitation, but I can see it being viewed as such. See [Issue #23](https://github.com/raquo/Airstream/issues/23).
 
 
 ## My Related Projects

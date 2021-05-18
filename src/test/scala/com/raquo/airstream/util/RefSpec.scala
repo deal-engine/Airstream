@@ -27,7 +27,7 @@ class RefSpec extends UnitSpec {
     val bus = new EventBus[Int]
 
     val signal = bus.events
-      .toSignal(initial = -1)
+      .startWith(initial = -1)
       .map(v => Ref.ref(Foo(v % 2)))
       .map(log("foo"))
       .map(v => Bar(v.value.id))
@@ -45,21 +45,25 @@ class RefSpec extends UnitSpec {
     calculations(0).name shouldEqual "foo"
     calculations(0).value match {
       case ref: Ref[_] => ref.value shouldEqual Foo(-1)
+      case _ => assert(false)
     }
 
     calculations(1).name shouldEqual "bar"
     calculations(1).value match {
       case Bar(v) => v shouldEqual -1
+      case _ => assert(false)
     }
 
     calculations(2).name shouldEqual "foo"
     calculations(2).value match {
       case ref: Ref[_] => ref.value shouldEqual Foo(1)
+      case _ => assert(false)
     }
 
     calculations(3).name shouldEqual "bar"
     calculations(3).value match {
       case Bar(v) => v shouldEqual 1
+      case _ => assert(false)
     }
 
     calculations.clear()
@@ -75,6 +79,7 @@ class RefSpec extends UnitSpec {
     calculations(0).name shouldEqual "foo"
     calculations(0).value match {
       case ref: Ref[_] => ref.value shouldEqual Foo(1)
+      case _ => assert(false)
     }
   }
 
