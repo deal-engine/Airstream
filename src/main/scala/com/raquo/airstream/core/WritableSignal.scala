@@ -19,6 +19,12 @@ trait WritableSignal[A] extends Signal[A] with WritableObservable[A] {
     maybeLastSeenCurrentValue = js.defined(newValue)
   }
 
+  // Workaround restartable signals. See https://github.com/raquo/Airstream/pull/69
+  override protected def onStop(): Unit = {
+    super.onStop()
+    maybeLastSeenCurrentValue = js.undefined
+  }
+
   /** Note: Initial value is only evaluated if/when needed (when there are observers) */
   override protected[airstream] def tryNow(): Try[A] = {
     maybeLastSeenCurrentValue.getOrElse {
